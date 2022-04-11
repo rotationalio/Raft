@@ -38,6 +38,9 @@ message AppendEntriesRequest {
 
     // leader’s commitIndex.
     int32 leaderCommit = 6;
+
+    // for debugging/logging purposes
+    string error = 15;
 }
 
 message AppendEntriesReply {
@@ -46,6 +49,9 @@ message AppendEntriesReply {
 
     // true if follower contained entry matching prevLogIndex and prevLogTerm.
     bool success = 2;
+
+    // for debugging/logging purposes
+    string error = 15;
 }
 
 // Invoked by candidates to gather votes (§5.2).
@@ -66,6 +72,9 @@ message VoteRequest {
 
     // term of candidate’s last log entry (5.4).
     int32 lastLogTerm = 4;
+
+    // for debugging/logging purposes
+    string error = 15;
 }
 
 message VoteReply {
@@ -74,4 +83,7 @@ message VoteReply {
 
     // true means candidate received vote
     bool voteGranted = 2;
+
+    // for debugging/logging purposes
+    string error = 15;
 }
