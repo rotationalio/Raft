@@ -24,7 +24,7 @@ func main() {
 	app.Usage = "Rotational Lab's implementation of the Raft consensus algorithm"
 	app.Flags = []cli.Flag{
 		&cli.StringFlag{
-			Name:    "conf-file",
+			Name:    "conf",
 			Aliases: []string{"f"},
 			Usage:   "path to the configuration file",
 			Value:   "",
@@ -34,7 +34,7 @@ func main() {
 	app.Commands = []*cli.Command{
 		{
 			Name:     "serve",
-			Usage:    "run the Traveler server",
+			Usage:    "run a Raft server",
 			Category: "server",
 			Action:   serve,
 			Flags: []cli.Flag{
