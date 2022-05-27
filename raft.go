@@ -3,14 +3,16 @@ package main
 import (
 	"Raft/api"
 	"context"
+	"io"
 	"net"
 	"os"
 	"os/signal"
-	"time"
+	"strings"
 
 	"fmt"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/rs/zerolog/log"
 	cli "github.com/urfave/cli/v2"
@@ -48,7 +50,7 @@ func main() {
 			Name:     "append",
 			Usage:    "",
 			Category: "Client",
-			Action:   appendValue,
+			Action:   appendValues,
 			Flags: []cli.Flag{
 				&cli.Int64Flag{
 					Name:    "port",
@@ -57,9 +59,15 @@ func main() {
 					Value:   9000,
 				},
 				&cli.StringFlag{
-					Name:    "value",
+					Name:    "values",
 					Aliases: []string{"v"},
-					Usage:   "value to store",
+					Usage:   "values to store",
+				},
+				&cli.IntFlag{
+					Name:    "term",
+					Aliases: []string{"t"},
+					Usage:   "current term",
+					Value:   1,
 				},
 			},
 		},
@@ -67,68 +75,79 @@ func main() {
 	app.Run(os.Args)
 }
 
-type server struct {
+type RaftServer struct {
 	api.UnimplementedRaftServer
+	CurrentTerm int32
+	Id          string
+	Log         []*api.Entry
+	CommitIndex int64
 }
 
 func serve(c *cli.Context) (err error) {
 	// Create a new gRPC Raft server
-	log.Info().Msg("Creating Server")
 	srv := grpc.NewServer()
-	api.RegisterRaftServer(srv, &server{})
+	api.RegisterRaftServer(srv, RaftServer{})
 
 	// Create a channel to receive interupt signals and shutdown the server.
-	log.Info().Msg("Creating Interrupt Channel")
 	ch := make(chan os.Signal, 2)
 	signal.Notify(ch, os.Interrupt)
+	address := fmt.Sprintf("localhost:%d", c.Int("port"))
 	go func() {
 		<-ch
-		fmt.Printf("Stopping server on localhost:%d\n", c.Int("port"))
+		fmt.Printf("Stopping server on on %v", address)
 		srv.Stop()
 		os.Exit(1)
 	}()
 
 	// Create a socket on the specified port.
-	log.Info().Msg("Creating Socket")
 	var sock net.Listener
-	if sock, err = net.Listen("tcp", fmt.Sprintf("localhost:%d", c.Int("port"))); err != nil {
+	if sock, err = net.Listen("tcp", address); err != nil {
 		log.Error().Msg(err.Error())
 		return err
 	}
 
 	// serve in a go function with the created socket.
-	log.Info().Msg("Servering")
-	go func() {
-		srv.Serve(sock)
-	}()
-
+	log.Info().Msg(fmt.Sprintf("servering on %v", address))
+	srv.Serve(sock)
+	return nil
 	// TODO: Handle timeouts, votes, etc...
-	for {
-		fmt.Print("still serving\n")
-		time.Sleep(15 * time.Second)
-	}
 }
 
-func appendValue(c *cli.Context) (err error) {
-	// Create a new Raft client
-	log.Info().Msg("Creating Client")
-	var conn *grpc.ClientConn
-	if conn, err = grpc.Dial(fmt.Sprintf("localhost:%d", c.Int("port")), grpc.WithInsecure()); err != nil {
+func appendValues(c *cli.Context) (err error) {
+	client, err := createClient(c.Int("port"))
+	if err != nil {
+		log.Error().Msg(fmt.Sprintf("error creating client: %v", err.Error()))
 		return err
 	}
-	defer conn.Close()
-	client := api.NewRaftClient(conn)
 
 	// Call AppendEntries and print the reply
-	log.Info().Msg(fmt.Sprintf("Appending %v", c.String("value")))
-	val := append([]string{}, c.String("value"))
-	req := &api.AppendEntriesRequest{Entries: val}
-	var rep *api.AppendEntriesReply
-	if rep, err = client.AppendEntries(context.Background(), req); err != nil {
-		log.Error().Msg(err.Error())
+	vals := strings.Split(c.String("values"), ",")
+
+	var stream api.Raft_AppendEntriesClient
+	if stream, err = client.AppendEntries(context.Background()); err != nil {
+		log.Error().Msg(fmt.Sprintf("error creating stream: %v", err.Error()))
 		return err
 	}
-	fmt.Print(rep)
+
+	for _, val := range vals {
+		req := &api.AppendEntriesRequest{
+			Term: int32(c.Int("term")),
+			Entries: []*api.Entry{
+				{
+					Term:  int32(c.Int("term")),
+					Value: val,
+				},
+			},
+		}
+		log.Info().Msg(fmt.Sprintf("appending %v", val))
+		stream.Send(req)
+	}
+	var reply *api.AppendEntriesReply
+	if reply, err = stream.CloseAndRecv(); err != nil {
+		log.Error().Msg(fmt.Sprintf("error finishing stream: %v", err.Error()))
+		return err
+	}
+	log.Info().Msg(fmt.Sprintf("success: %t", reply.Success))
 	return nil
 }
 
@@ -145,11 +164,37 @@ func appendValue(c *cli.Context) (err error) {
 // 4. Append any new entries not already in the log
 // 5. If leaderCommit > commitIndex, set commitIndex =
 //    min(leaderCommit, index of last new entry)
-func AppendEntries(ctx context.Context, req *api.AppendEntriesRequest) (rep *api.AppendEntriesReply, err error) {
-	return &api.AppendEntriesReply{
-		Term:    0,
-		Success: true,
-		Error:   req.Entries[0]}, nil
+func (s RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err error) {
+	var req *api.AppendEntriesRequest
+	for {
+		req, err = stream.Recv()
+		if err == io.EOF {
+			log.Info().Msg(fmt.Sprintf("current log: %v", s.Log))
+			return stream.SendAndClose(
+				&api.AppendEntriesReply{
+					Success: true,
+				},
+			)
+		}
+		if err != nil {
+			return err
+		}
+		s.Log = append(s.Log, req.Entries...)
+		// TODO: use the following to handle multi-replica case (tentative)
+		//for _, entry := range req.Entries {
+		// if i >= len(s.Log) {
+		//	s.Log = append(s.Log, entry)
+		// } else if entry.Term < s.CurrentTerm {
+		// 	return stream.SendAndClose(
+		// 		&api.AppendEntriesReply{
+		// 			Success: false,
+		// 		})
+		//} else if entry.Term != s.Log[i].Term {
+		// if entry.Term != s.Log[i].Term {
+		// 	s.Log = s.Log[:i]
+		// }
+		//}
+	}
 }
 
 // Invoked by candidates to gather votes (§5.2).
@@ -162,4 +207,14 @@ func AppendEntries(ctx context.Context, req *api.AppendEntriesRequest) (rep *api
 // TODO: To impliment after single-replica version
 func RequestVote(ctx context.Context, req *api.VoteRequest) (rep *api.VoteReply, err error) {
 	return &api.VoteReply{}, nil
+}
+
+func createClient(port int) (client api.RaftClient, err error) {
+	log.Info().Msg("Creating Client")
+	var conn *grpc.ClientConn
+	if conn, err = grpc.Dial(fmt.Sprintf("localhost:%d", port), grpc.WithTransportCredentials(insecure.NewCredentials())); err != nil {
+		return nil, err
+	}
+	client = api.NewRaftClient(conn)
+	return client, nil
 }

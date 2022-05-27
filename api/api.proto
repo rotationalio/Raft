@@ -4,7 +4,7 @@ package api;
 option go_package = "github.com/rotationalio/api";
 
 service Raft {
-    rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesReply) {};
+    rpc AppendEntries(stream AppendEntriesRequest) returns (AppendEntriesReply) {};
     rpc RequestVote(VoteRequest) returns (VoteReply) {};
 }
 
@@ -22,7 +22,7 @@ message AppendEntriesRequest {
     int32 prevLogTerm = 4;
 
     // The log entries to store (empty for heartbeat; may send more than one for efficiency)
-    repeated string entries = 5;
+    repeated Entry entries = 5;
 
     // The leader’s commitIndex.
     int32 leaderCommit = 6;
@@ -68,4 +68,9 @@ message VoteReply {
 
     // For debugging/logging purposes.
     string error = 15;
+}
+
+message Entry {
+    int32 Term = 1;
+    string Value = 2;
 }
