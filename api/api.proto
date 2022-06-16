@@ -4,23 +4,10 @@ package api;
 option go_package = "github.com/rotationalio/api";
 
 service Raft {
-    rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesReply) {};
+    rpc AppendEntries(stream AppendEntriesRequest) returns (AppendEntriesReply) {};
     rpc RequestVote(VoteRequest) returns (VoteReply) {};
 }
 
-// Invoked by leader to replicate log entries (section 5.3 of the Raft whitepaper); 
-// also used as heartbeat (section 5.2 of the Raft whitepaper).
-// 
-// Receiver implementation:
-// 1. Reply false if term < currentTerm (section §5.1 of the Raft whitepaper)
-// 2. Reply false if log doesn’t contain an entry at prevLogIndex
-//    whose term matches prevLogTerm (section §5.3 of the Raft whitepaper)
-// 3. If an existing entry conflicts with a new one (same index
-//    but different terms), delete the existing entry and all that
-//    follow it (section §5.3 of the Raft whitepaper)
-// 4. Append any new entries not already in the log
-// 5. If leaderCommit > commitIndex, set commitIndex =
-//    min(leaderCommit, index of last new entry)
 message AppendEntriesRequest {
     // The leader’s term.
     int32 term = 1;
@@ -35,7 +22,7 @@ message AppendEntriesRequest {
     int32 prevLogTerm = 4;
 
     // The log entries to store (empty for heartbeat; may send more than one for efficiency)
-    repeated string entries = 5;
+    repeated Entry entries = 5;
 
     // The leader’s commitIndex.
     int32 leaderCommit = 6;
@@ -55,13 +42,6 @@ message AppendEntriesReply {
     string error = 15;
 }
 
-// Invoked by candidates to gather votes (§5.2).
-// 
-// Receiver implementation:
-// 1. Reply false if term < currentTerm (§5.1).
-// 2. If votedFor is null or candidateId, and candidate’s log is at
-//    least as up-to-date as receiver’s log, grant vote (sections §5.2, §5.4 of the 
-//    Raft whitepaper).
 message VoteRequest {
     // The candidate's term.
     int32 term = 1;
@@ -88,4 +68,9 @@ message VoteReply {
 
     // For debugging/logging purposes.
     string error = 15;
+}
+
+message Entry {
+    int32 Term = 1;
+    string Value = 2;
 }
