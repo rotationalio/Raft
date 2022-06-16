@@ -3,152 +3,75 @@ package main
 import (
 	"Raft/api"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/signal"
-	"strings"
 
-	"fmt"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-
+	"github.com/influxdata/influxdb/uuid"
 	"github.com/rs/zerolog/log"
-	cli "github.com/urfave/cli/v2"
+	"google.golang.org/grpc"
+	"k8s.io/apimachinery/pkg/util/uuid"
 )
-
-func main() {
-	app := cli.NewApp()
-	app.Name = "Raft"
-	app.Usage = "Rotational Lab's implementation of the Raft consensus algorithm"
-	app.Flags = []cli.Flag{
-		&cli.StringFlag{
-			Name:    "conf",
-			Aliases: []string{"f"},
-			Usage:   "path to the configuration file",
-			Value:   "",
-		},
-	}
-
-	app.Commands = []*cli.Command{
-		{
-			Name:     "serve",
-			Usage:    "run a Raft server",
-			Category: "Server",
-			Action:   serve,
-			Flags: []cli.Flag{
-				&cli.Int64Flag{
-					Name:    "port",
-					Aliases: []string{"p"},
-					Usage:   "port to serve on",
-					Value:   9000,
-				},
-			},
-		},
-		{
-			Name:     "append",
-			Usage:    "",
-			Category: "Client",
-			Action:   appendValues,
-			Flags: []cli.Flag{
-				&cli.Int64Flag{
-					Name:    "port",
-					Aliases: []string{"p"},
-					Usage:   "port to serve on",
-					Value:   9000,
-				},
-				&cli.StringFlag{
-					Name:    "values",
-					Aliases: []string{"v"},
-					Usage:   "values to store",
-				},
-				&cli.IntFlag{
-					Name:    "term",
-					Aliases: []string{"t"},
-					Usage:   "current term",
-					Value:   1,
-				},
-			},
-		},
-	}
-	app.Run(os.Args)
-}
 
 type RaftServer struct {
 	api.UnimplementedRaftServer
-	CurrentTerm int32
-	Id          string
-	Log         []*api.Entry
-	CommitIndex int64
+
+	// Persistent state on all servers (Updated on stable storage before responding to RPCs)
+	id          string //
+	port        int
+	currentTerm int32        // latest term server has seen (initialized to 0 on first boot, increases monotonically)
+	votedFor    string       // candidate Id that received vote in current term (or nil if none)
+	log         []*api.Entry // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
+
+	// Volatile state on all servers
+	commitIndex int64 // index of the highest log entry known to be committed (initialized to 0, increases monotonically)
+	lastApplied int64 // index of highest log entry applied to state machine (initialized to 0, increases monotonically)
+	state       State
+
+	// Volatile state on leaders (Reinitialized after election)
+	// TODO: change these to slices when dealing with multiple replica state
+	nextIndex  int64 // for each server, index of the next log entry to send to that server (initialized to leader's last log index + 1)
+	matchIndex int64 // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
 }
 
-func serve(c *cli.Context) (err error) {
+func serveRaft(port int) (err error) {
 	// Create a new gRPC Raft server
-	srv := grpc.NewServer()
-	api.RegisterRaftServer(srv, RaftServer{})
+	server := grpc.NewServer()
+	raftServer := RaftServer{}
+	raftServer.port = port
+	raftServer.initialize(false)
+	api.RegisterRaftServer(server, &raftServer)
 
 	// Create a channel to receive interupt signals and shutdown the server.
 	ch := make(chan os.Signal, 2)
 	signal.Notify(ch, os.Interrupt)
-	address := fmt.Sprintf("localhost:%d", c.Int("port"))
+	address := fmt.Sprintf("localhost:%d", port)
 	go func() {
 		<-ch
 		fmt.Printf("Stopping server on on %v", address)
-		srv.Stop()
+		server.Stop()
 		os.Exit(1)
 	}()
 
 	// Create a socket on the specified port.
-	var sock net.Listener
-	if sock, err = net.Listen("tcp", address); err != nil {
+	var listener net.Listener
+	if listener, err = net.Listen("tcp", address); err != nil {
 		log.Error().Msg(err.Error())
 		return err
 	}
 
 	// serve in a go function with the created socket.
-	log.Info().Msg(fmt.Sprintf("servering on %v", address))
-	srv.Serve(sock)
+	log.Info().Msg(fmt.Sprintf("serving on %v", address))
+	server.Serve(listener)
 	return nil
+
 	// TODO: Handle timeouts, votes, etc...
 }
 
-func appendValues(c *cli.Context) (err error) {
-	client, err := createClient(c.Int("port"))
-	if err != nil {
-		log.Error().Msg(fmt.Sprintf("error creating client: %v", err.Error()))
-		return err
-	}
-
-	// Call AppendEntries and print the reply
-	vals := strings.Split(c.String("values"), ",")
-
-	var stream api.Raft_AppendEntriesClient
-	if stream, err = client.AppendEntries(context.Background()); err != nil {
-		log.Error().Msg(fmt.Sprintf("error creating stream: %v", err.Error()))
-		return err
-	}
-
-	for _, val := range vals {
-		req := &api.AppendEntriesRequest{
-			Term: int32(c.Int("term")),
-			Entries: []*api.Entry{
-				{
-					Term:  int32(c.Int("term")),
-					Value: val,
-				},
-			},
-		}
-		log.Info().Msg(fmt.Sprintf("appending %v", val))
-		stream.Send(req)
-	}
-	var reply *api.AppendEntriesReply
-	if reply, err = stream.CloseAndRecv(); err != nil {
-		log.Error().Msg(fmt.Sprintf("error finishing stream: %v", err.Error()))
-		return err
-	}
-	log.Info().Msg(fmt.Sprintf("success: %t", reply.Success))
-	return nil
+func (s *RaftServer) State() State {
+	return s.state
 }
 
 // Invoked by leader to replicate log entries (section 5.3 of the Raft whitepaper);
@@ -164,12 +87,12 @@ func appendValues(c *cli.Context) (err error) {
 // 4. Append any new entries not already in the log
 // 5. If leaderCommit > commitIndex, set commitIndex =
 //    min(leaderCommit, index of last new entry)
-func (s RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err error) {
+func (s *RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err error) {
 	var req *api.AppendEntriesRequest
 	for {
 		req, err = stream.Recv()
 		if err == io.EOF {
-			log.Info().Msg(fmt.Sprintf("current log: %v", s.Log))
+			log.Info().Msg(fmt.Sprintf("current log: %v", s.log))
 			return stream.SendAndClose(
 				&api.AppendEntriesReply{
 					Success: true,
@@ -179,7 +102,8 @@ func (s RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err erro
 		if err != nil {
 			return err
 		}
-		s.Log = append(s.Log, req.Entries...)
+		s.log = append(s.log, req.Entries...)
+
 		// TODO: use the following to handle multi-replica case (tentative)
 		//for _, entry := range req.Entries {
 		// if i >= len(s.Log) {
@@ -204,17 +128,23 @@ func (s RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err erro
 // 2. If votedFor is null or candidateId, and candidate’s log is at
 //    least as up-to-date as receiver’s log, grant vote (sections §5.2, §5.4 of the
 //    Raft whitepaper).
-// TODO: To impliment after single-replica version
-func RequestVote(ctx context.Context, req *api.VoteRequest) (rep *api.VoteReply, err error) {
+// TODO: impliment for multi-replica version with leader election
+func (s *RaftServer) RequestVote(ctx context.Context, req *api.VoteRequest) (rep *api.VoteReply, err error) {
 	return &api.VoteReply{}, nil
 }
 
-func createClient(port int) (client api.RaftClient, err error) {
-	log.Info().Msg("Creating Client")
-	var conn *grpc.ClientConn
-	if conn, err = grpc.Dial(fmt.Sprintf("localhost:%d", port), grpc.WithTransportCredentials(insecure.NewCredentials())); err != nil {
-		return nil, err
+func (s *RaftServer) initialize(electedLeader bool) error {
+	if !electedLeader {
+		s.id = uuid.UUID + ":" + s.port
+		s.currentTerm = 0
+		s.votedFor = ""
+		s.commitIndex = 0
+		s.lastApplied = 0
+		s.state = follower
+	} else {
+		s.nextIndex = int64(len(s.log) + 1)
+		s.matchIndex = 0
+		s.state = leader
 	}
-	client = api.NewRaftClient(conn)
-	return client, nil
+	return nil
 }
