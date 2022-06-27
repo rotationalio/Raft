@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
@@ -31,9 +32,15 @@ type Peer struct {
 type RaftServer struct {
 	api.UnimplementedRaftServer
 
+	// channels
+	shutdown  chan os.Signal
+	heartbeat *time.Ticker
+
 	// Persistent state on all servers (Updated on stable storage before responding to RPCs).
 	id          string // The uuid uniquely identifying the raft node.
 	port        int    // The port the node is serving on.
+	address     string
+	srv         *grpc.Server
 	quorum      []Peer
 	currentTerm int32        // latest term server has seen (initialized to 0 on first boot, increases monotonically).
 	votedFor    string       // candidate Id that received vote in current term (or nil if none).
@@ -52,39 +59,50 @@ type RaftServer struct {
 
 func ServeRaft(port int, id string) (err error) {
 	// Create a new gRPC Raft server.
-	server := grpc.NewServer()
-	raftServer := RaftServer{}
+	raftServer := RaftServer{srv: grpc.NewServer()}
 	raftServer.id = id
 	raftServer.port = port
 	if err = raftServer.initialize(false); err != nil {
 		return err
 	}
-	api.RegisterRaftServer(server, &raftServer)
+	api.RegisterRaftServer(raftServer.srv, &raftServer)
 
 	// Create a channel to receive interrupt signals and shutdown the server.
-	ch := make(chan os.Signal, 2)
-	signal.Notify(ch, os.Interrupt)
-	address := fmt.Sprintf("localhost:%d", port)
-	go func() {
-		<-ch
-		fmt.Printf("Stopping server on on %v", address)
-		server.Stop()
-		os.Exit(1)
-	}()
+	shutdown := make(chan os.Signal, 2)
+	signal.Notify(shutdown, os.Interrupt)
+	raftServer.shutdown = shutdown
+	raftServer.address = fmt.Sprintf("localhost:%d", port)
 
 	// Create a socket on the specified port.
 	var listener net.Listener
-	if listener, err = net.Listen("tcp", address); err != nil {
+	if listener, err = net.Listen("tcp", raftServer.address); err != nil {
 		log.Error().Msg(err.Error())
 		return err
 	}
 
 	// serve in a go function with the created socket.
-	log.Info().Msg(fmt.Sprintf("serving %v on %v", id, address))
-	server.Serve(listener)
+	log.Info().Msg(fmt.Sprintf("serving %v on %v", id, raftServer.address))
+	go raftServer.eventLoop()
+	raftServer.srv.Serve(listener)
 	return nil
 
 	// TODO: Handle timeouts, votes, etc...
+}
+
+func (s *RaftServer) eventLoop() {
+	go func() {
+		for {
+			select {
+			case <-s.shutdown:
+				fmt.Printf("\nStopping server on on %v\n", s.address)
+				s.srv.Stop()
+				os.Exit(1)
+			case <-s.heartbeat.C:
+				fmt.Println("tick")
+
+			}
+		}
+	}()
 }
 
 func (s *RaftServer) State() State {
@@ -157,12 +175,14 @@ func (s *RaftServer) initialize(electedLeader bool) error {
 		s.commitIndex = 0
 		s.lastApplied = 0
 		s.state = follower
+		s.heartbeat = time.NewTicker(time.Second * 5)
 		err := s.findQuorum()
 		return err
 	} else {
 		s.nextIndex = int64(len(s.log) + 1)
 		s.matchIndex = 0
 		s.state = leader
+		s.heartbeat = time.NewTicker(time.Second * 4)
 	}
 	return nil
 }
