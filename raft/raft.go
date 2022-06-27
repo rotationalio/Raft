@@ -36,12 +36,14 @@ type RaftServer struct {
 	shutdown  chan os.Signal
 	heartbeat *time.Ticker
 
+	// Self identification
+	id      string // The uuid uniquely identifying the raft node.
+	port    int    // The port the node is serving on.
+	address string
+	srv     *grpc.Server
+	quorum  []Peer
+
 	// Persistent state on all servers (Updated on stable storage before responding to RPCs).
-	id          string // The uuid uniquely identifying the raft node.
-	port        int    // The port the node is serving on.
-	address     string
-	srv         *grpc.Server
-	quorum      []Peer
 	currentTerm int32        // latest term server has seen (initialized to 0 on first boot, increases monotonically).
 	votedFor    string       // candidate Id that received vote in current term (or nil if none).
 	log         []*api.Entry // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1).
@@ -59,37 +61,37 @@ type RaftServer struct {
 
 func ServeRaft(port int, id string) (err error) {
 	// Create a new gRPC Raft server.
-	raftServer := RaftServer{srv: grpc.NewServer()}
-	raftServer.id = id
-	raftServer.port = port
-	if err = raftServer.initialize(false); err != nil {
+	raftNode := RaftServer{srv: grpc.NewServer()}
+	raftNode.id = id
+	raftNode.port = port
+	if err = raftNode.initialize(false); err != nil {
 		return err
 	}
-	api.RegisterRaftServer(raftServer.srv, &raftServer)
+	api.RegisterRaftServer(raftNode.srv, &raftNode)
 
 	// Create a channel to receive interrupt signals and shutdown the server.
 	shutdown := make(chan os.Signal, 2)
 	signal.Notify(shutdown, os.Interrupt)
-	raftServer.shutdown = shutdown
-	raftServer.address = fmt.Sprintf("localhost:%d", port)
+	raftNode.shutdown = shutdown
+	raftNode.address = fmt.Sprintf("localhost:%d", port)
 
 	// Create a socket on the specified port.
 	var listener net.Listener
-	if listener, err = net.Listen("tcp", raftServer.address); err != nil {
+	if listener, err = net.Listen("tcp", raftNode.address); err != nil {
 		log.Error().Msg(err.Error())
 		return err
 	}
 
 	// serve in a go function with the created socket.
-	log.Info().Msg(fmt.Sprintf("serving %v on %v", id, raftServer.address))
-	go raftServer.eventLoop()
-	raftServer.srv.Serve(listener)
+	log.Info().Msg(fmt.Sprintf("serving %v on %v", id, raftNode.address))
+	go raftNode.oneBigPipe()
+	raftNode.srv.Serve(listener)
 	return nil
 
 	// TODO: Handle timeouts, votes, etc...
 }
 
-func (s *RaftServer) eventLoop() {
+func (s *RaftServer) oneBigPipe() {
 	go func() {
 		for {
 			select {
