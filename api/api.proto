@@ -4,73 +4,88 @@ package api;
 option go_package = "github.com/rotationalio/api";
 
 service Raft {
-    rpc AppendEntries(stream AppendEntriesRequest) returns (AppendEntriesReply) {};
+    rpc AppendEntries(stream AppendEntriesRequest) returns (stream AppendEntriesReply) {};
     rpc RequestVote(VoteRequest) returns (VoteReply) {};
 }
 
 message AppendEntriesRequest {
+    // The uuid of the Raft node sending the request.
+    string id = 1;
+   
     // The leader’s term.
-    int32 term = 1;
+    int32 term = 2;
 
     // So follower can redirect clients.
-    string leaderId = 2;
+    string leaderId = 3;
 
     // The index of log entry immediately preceding new ones.
-    int32 prevLogIndex = 3;
+    int32 prevLogIndex = 4;
 
     // The term of the prevLogIndex entry.
-    int32 prevLogTerm = 4;
+    int32 prevLogTerm = 5;
 
     // The log entries to store (empty for heartbeat; may send more than one for efficiency)
-    repeated Entry entries = 5;
+    repeated Entry entries = 6;
 
     // The leader’s commitIndex.
-    int32 leaderCommit = 6;
+    int32 leaderCommit = 7;
 
     // For debugging/logging purposes.
     string error = 15;
 }
 
 message AppendEntriesReply {
+    // The uuid of the Raft node sending the reply.
+    string id = 1;
+    
     // The current term number, for the leader to update itself.
-    int32 term = 1;
+    int32 term = 2;
 
     // True if follower contained entry matching prevLogIndex and prevLogTerm.
-    bool success = 2;
+    bool success = 3;
 
     // For debugging/logging purposes.
     string error = 15;
 }
 
 message VoteRequest {
+    // The uuid of the Raft node sending the request.
+    string id = 1;
+    
     // The candidate's term.
-    int32 term = 1;
+    int32 term = 2;
 
     // The candidate requesting a vote.
-    string candidateId = 2;
+    string candidateId = 3;
 
     // The index of candidate’s last log entry (section 5.4 of the Raft whitepaper).
-    int32 lastLogIndex = 3;
+    int32 lastLogIndex = 4;
 
     // The term number of candidate’s last log entry (section 5.4 of the Raft whitepaper).
-    int32 lastLogTerm = 4;
+    int32 lastLogTerm = 5;
 
     // For debugging/logging purposes.
     string error = 15;
 }
 
 message VoteReply {
+    // The uuid of the Raft node sending the reply.
+    string id = 1;
+    
     // The current term number, for candidate to update itself.
-    int32 term = 1;
+    int32 term = 2;
 
     // True means the candidate received the vote.
-    bool voteGranted = 2;
+    bool voteGranted = 3;
 
     // For debugging/logging purposes.
     string error = 15;
 }
 
 message Entry {
+    //
     int32 Term = 1;
+    
+    //
     string Value = 2;
 }

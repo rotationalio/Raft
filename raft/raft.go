@@ -1,4 +1,4 @@
-package main
+package raft
 
 import (
 	"Raft/api"
@@ -9,42 +9,56 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/influxdata/influxdb/uuid"
+	"github.com/go-yaml/yaml"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
-	"k8s.io/apimachinery/pkg/util/uuid"
 )
+
+type State uint8
+
+const (
+	leader State = iota
+	follower
+	candidate
+)
+
+type peer struct {
+	id   string
+	port int
+}
 
 type RaftServer struct {
 	api.UnimplementedRaftServer
 
-	// Persistent state on all servers (Updated on stable storage before responding to RPCs)
-	id          string //
-	port        int
-	currentTerm int32        // latest term server has seen (initialized to 0 on first boot, increases monotonically)
-	votedFor    string       // candidate Id that received vote in current term (or nil if none)
-	log         []*api.Entry // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
+	// Persistent state on all servers (Updated on stable storage before responding to RPCs).
+	id          string // The uuid uniquely identifying the raft node.
+	port        int    // The port the node is serving on.
+	quorum      []*peer
+	currentTerm int32        // latest term server has seen (initialized to 0 on first boot, increases monotonically).
+	votedFor    string       // candidate Id that received vote in current term (or nil if none).
+	log         []*api.Entry // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1).
 
 	// Volatile state on all servers
-	commitIndex int64 // index of the highest log entry known to be committed (initialized to 0, increases monotonically)
-	lastApplied int64 // index of highest log entry applied to state machine (initialized to 0, increases monotonically)
-	state       State
+	commitIndex int64 // index of the highest log entry known to be committed (initialized to 0, increases monotonically).
+	lastApplied int64 // index of highest log entry applied to state machine (initialized to 0, increases monotonically).
+	state       State // The current state of the node, either leader, candidate or follower.
 
-	// Volatile state on leaders (Reinitialized after election)
+	// Volatile state on leaders (Reinitialized after election).
 	// TODO: change these to slices when dealing with multiple replica state
-	nextIndex  int64 // for each server, index of the next log entry to send to that server (initialized to leader's last log index + 1)
-	matchIndex int64 // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
+	nextIndex  int64 // for each server, index of the next log entry to send to that server (initialized to leader's last log index + 1).
+	matchIndex int64 // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically).
 }
 
-func serveRaft(port int) (err error) {
-	// Create a new gRPC Raft server
+func ServeRaft(port int, id string) (err error) {
+	// Create a new gRPC Raft server.
 	server := grpc.NewServer()
 	raftServer := RaftServer{}
+	raftServer.id = id
 	raftServer.port = port
 	raftServer.initialize(false)
 	api.RegisterRaftServer(server, &raftServer)
 
-	// Create a channel to receive interupt signals and shutdown the server.
+	// Create a channel to receive interrupt signals and shutdown the server.
 	ch := make(chan os.Signal, 2)
 	signal.Notify(ch, os.Interrupt)
 	address := fmt.Sprintf("localhost:%d", port)
@@ -63,7 +77,7 @@ func serveRaft(port int) (err error) {
 	}
 
 	// serve in a go function with the created socket.
-	log.Info().Msg(fmt.Sprintf("serving on %v", address))
+	log.Info().Msg(fmt.Sprintf("serving %v on %v", id, address))
 	server.Serve(listener)
 	return nil
 
@@ -78,15 +92,15 @@ func (s *RaftServer) State() State {
 // also used as heartbeat (section 5.2 of the Raft whitepaper).
 //
 // Receiver implementation:
-// 1. Reply false if term < currentTerm (section §5.1 of the Raft whitepaper)
+// 1. Reply false if term < currentTerm (section §5.1 of the Raft whitepaper).
 // 2. Reply false if log doesn’t contain an entry at prevLogIndex
-//    whose term matches prevLogTerm (section §5.3 of the Raft whitepaper)
+//    whose term matches prevLogTerm (section §5.3 of the Raft whitepaper).
 // 3. If an existing entry conflicts with a new one (same index
 //    but different terms), delete the existing entry and all that
-//    follow it (section §5.3 of the Raft whitepaper)
-// 4. Append any new entries not already in the log
+//    follow it (section §5.3 of the Raft whitepaper).
+// 4. Append any new entries not already in the log.
 // 5. If leaderCommit > commitIndex, set commitIndex =
-//    min(leaderCommit, index of last new entry)
+//    min(leaderCommit, index of last new entry).
 func (s *RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err error) {
 	var req *api.AppendEntriesRequest
 	for {
@@ -128,23 +142,37 @@ func (s *RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err err
 // 2. If votedFor is null or candidateId, and candidate’s log is at
 //    least as up-to-date as receiver’s log, grant vote (sections §5.2, §5.4 of the
 //    Raft whitepaper).
-// TODO: impliment for multi-replica version with leader election
+// TODO: implement for multi-replica version with leader election
 func (s *RaftServer) RequestVote(ctx context.Context, req *api.VoteRequest) (rep *api.VoteReply, err error) {
 	return &api.VoteReply{}, nil
 }
 
 func (s *RaftServer) initialize(electedLeader bool) error {
 	if !electedLeader {
-		s.id = uuid.UUID + ":" + s.port
 		s.currentTerm = 0
 		s.votedFor = ""
 		s.commitIndex = 0
 		s.lastApplied = 0
 		s.state = follower
+		err := s.findQuorum()
+		return err
 	} else {
 		s.nextIndex = int64(len(s.log) + 1)
 		s.matchIndex = 0
 		s.state = leader
 	}
+	return nil
+}
+
+func (s *RaftServer) findQuorum() error {
+	data, err := os.ReadFile("config.yml")
+	if err != nil {
+		return err
+	}
+	err = yaml.Unmarshal(data, s.quorum)
+	if err != nil {
+		return err
+	}
+	log.Info().Msg(fmt.Sprintf("%v", s.quorum))
 	return nil
 }

@@ -2,17 +2,16 @@ package main
 
 import (
 	"Raft/api"
+	"Raft/raft"
 	"context"
+	"fmt"
 	"os"
 	"strings"
 
-	"fmt"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-
 	"github.com/rs/zerolog/log"
 	cli "github.com/urfave/cli/v2"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
@@ -36,10 +35,16 @@ func main() {
 			Action:   serve,
 			Flags: []cli.Flag{
 				&cli.Int64Flag{
-					Name:    "port",
-					Aliases: []string{"p"},
-					Usage:   "port to serve on",
-					Value:   9000,
+					Name:     "port",
+					Aliases:  []string{"p"},
+					Usage:    "port to serve on",
+					Required: true,
+				},
+				&cli.StringFlag{
+					Name:     "id",
+					Aliases:  []string{"i"},
+					Usage:    "name of the node",
+					Required: true,
 				},
 			},
 		},
@@ -79,7 +84,7 @@ var (
 )
 
 func serve(c *cli.Context) (err error) {
-	if err = serveRaft(c.Int("port")); err != nil {
+	if err = raft.ServeRaft(c.Int("port"), c.String("id")); err != nil {
 		return cli.Exit(err, 1)
 	}
 	return nil
