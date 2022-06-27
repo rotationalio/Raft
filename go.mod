@@ -3,11 +3,11 @@ module Raft
 go 1.17
 
 require (
-	github.com/go-yaml/yaml v2.1.0+incompatible
 	github.com/rs/zerolog v1.26.1
 	github.com/urfave/cli/v2 v2.4.0
 	google.golang.org/grpc v1.45.0
 	google.golang.org/protobuf v1.27.1
+	gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c
 )
 
 require (

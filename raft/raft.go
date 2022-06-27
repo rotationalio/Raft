@@ -3,13 +3,14 @@ package raft
 import (
 	"Raft/api"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"os"
 	"os/signal"
 
-	"github.com/go-yaml/yaml"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
 )
@@ -22,9 +23,9 @@ const (
 	candidate
 )
 
-type peer struct {
-	id   string
-	port int
+type Peer struct {
+	Id   string `json:"id"`
+	Port int    `json:"port"`
 }
 
 type RaftServer struct {
@@ -33,7 +34,7 @@ type RaftServer struct {
 	// Persistent state on all servers (Updated on stable storage before responding to RPCs).
 	id          string // The uuid uniquely identifying the raft node.
 	port        int    // The port the node is serving on.
-	quorum      []*peer
+	quorum      []Peer
 	currentTerm int32        // latest term server has seen (initialized to 0 on first boot, increases monotonically).
 	votedFor    string       // candidate Id that received vote in current term (or nil if none).
 	log         []*api.Entry // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1).
@@ -55,7 +56,9 @@ func ServeRaft(port int, id string) (err error) {
 	raftServer := RaftServer{}
 	raftServer.id = id
 	raftServer.port = port
-	raftServer.initialize(false)
+	if err = raftServer.initialize(false); err != nil {
+		return err
+	}
 	api.RegisterRaftServer(server, &raftServer)
 
 	// Create a channel to receive interrupt signals and shutdown the server.
@@ -165,14 +168,19 @@ func (s *RaftServer) initialize(electedLeader bool) error {
 }
 
 func (s *RaftServer) findQuorum() error {
-	data, err := os.ReadFile("config.yml")
+	jsonBytes, err := ioutil.ReadFile("config.json")
 	if err != nil {
 		return err
 	}
-	err = yaml.Unmarshal(data, s.quorum)
-	if err != nil {
+	var peers []Peer
+	if err = json.Unmarshal(jsonBytes, &peers); err != nil {
 		return err
 	}
-	log.Info().Msg(fmt.Sprintf("%v", s.quorum))
+	for _, peer := range peers {
+		if peer.Id != s.id {
+			s.quorum = append(s.quorum, peer)
+		}
+	}
+	log.Info().Msg(fmt.Sprintf("Quorum:  %v", s.quorum))
 	return nil
 }
