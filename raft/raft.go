@@ -14,6 +14,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type State uint8
@@ -25,8 +26,28 @@ const (
 )
 
 type Peer struct {
-	Id   string `json:"id"`
-	Port int    `json:"port"`
+	Id      string `json:"id"`
+	Port    int    `json:"port"`
+	Address string
+	Client  api.RaftClient
+}
+
+const (
+	ElectionTimeoutTick time.Duration = time.Second * 5
+	HeartbeatTick       time.Duration = time.Second * 2
+)
+
+type Ticker struct {
+	period  time.Duration
+	timeout time.Ticker
+}
+
+func NewTicker(period time.Duration) *Ticker {
+	return &Ticker{period, *time.NewTicker(period)}
+}
+
+func (t *Ticker) Reset() {
+	t.timeout = *time.NewTicker(t.period)
 }
 
 type RaftServer struct {
@@ -34,7 +55,7 @@ type RaftServer struct {
 
 	// channels
 	shutdown  chan os.Signal
-	heartbeat *time.Ticker
+	heartbeat *Ticker
 
 	// Self identification
 	id      string // The uuid uniquely identifying the raft node.
@@ -91,24 +112,91 @@ func ServeRaft(port int, id string) (err error) {
 	// TODO: Handle timeouts, votes, etc...
 }
 
-func (s *RaftServer) oneBigPipe() {
+func (s *RaftServer) oneBigPipe() (err error) {
+	err = nil
 	go func() {
 		for {
 			select {
 			case <-s.shutdown:
-				fmt.Printf("\nStopping server on on %v\n", s.address)
-				s.srv.Stop()
-				os.Exit(1)
-			case <-s.heartbeat.C:
-				fmt.Println("tick")
-
+				s.gracefulShutdown()
+			case <-s.heartbeat.timeout.C:
+				if s.state == leader {
+					err = s.sendHeartbeat()
+				} else {
+					err = s.startElection()
+				}
 			}
 		}
+		if err != nil {
+			return
+		}
 	}()
+	return err
 }
 
 func (s *RaftServer) State() State {
 	return s.state
+}
+
+func (s *RaftServer) gracefulShutdown() {
+	fmt.Printf("\nStopping server on on %v\n", s.address)
+	s.srv.Stop()
+	os.Exit(1)
+}
+
+func (s *RaftServer) sendHeartbeat() (err error) {
+	var stream api.Raft_AppendEntriesClient
+	in := &api.AppendEntriesRequest{}
+	var out *api.AppendEntriesReply
+
+	for _, peer := range s.quorum {
+		stream, err = peer.Client.AppendEntries(context.TODO())
+		stream.Send(in)
+		if out, err = stream.CloseAndRecv(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *RaftServer) startElection() (err error) {
+	s.currentTerm++
+
+	var out *api.VoteReply
+	in := &api.VoteRequest{
+		Term:         s.currentTerm,
+		CandidateId:  s.id,
+		LastLogIndex: s.lastApplied,
+		LastLogTerm:  s.log[s.lastApplied].Term,
+	}
+
+	votesReceived := 0
+	votesNeeded := len(s.quorum) + 1
+
+	for _, peer := range s.quorum {
+
+		if out, err = peer.Client.RequestVote(context.TODO(), in); err != nil {
+			return err
+		}
+
+		if out.VoteGranted {
+
+			votesReceived++
+			if votesReceived >= votesNeeded {
+
+				s.state = leader
+
+				if err = s.initialize(true); err != nil {
+					return err
+				}
+
+				if err = s.sendHeartbeat(); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // Invoked by leader to replicate log entries (section 5.3 of the Raft whitepaper);
@@ -177,32 +265,53 @@ func (s *RaftServer) initialize(electedLeader bool) error {
 		s.commitIndex = 0
 		s.lastApplied = 0
 		s.state = follower
-		s.heartbeat = time.NewTicker(time.Second * 5)
+		s.heartbeat = NewTicker(ElectionTimeoutTick)
 		err := s.findQuorum()
 		return err
 	} else {
 		s.nextIndex = int64(len(s.log) + 1)
 		s.matchIndex = 0
 		s.state = leader
-		s.heartbeat = time.NewTicker(time.Second * 4)
+		s.heartbeat = NewTicker(HeartbeatTick)
+		return nil
 	}
-	return nil
 }
 
-func (s *RaftServer) findQuorum() error {
+func (s *RaftServer) findQuorum() (err error) {
 	jsonBytes, err := ioutil.ReadFile("config.json")
 	if err != nil {
 		return err
 	}
+
 	var peers []Peer
 	if err = json.Unmarshal(jsonBytes, &peers); err != nil {
 		return err
 	}
+
 	for _, peer := range peers {
 		if peer.Id != s.id {
+			peer.Address = fmt.Sprintf("localhost:%d", peer.Port)
+			if peer.Client, err = CreateClient(peer.Address); err != nil {
+				return err
+			}
 			s.quorum = append(s.quorum, peer)
 		}
 	}
+
 	log.Info().Msg(fmt.Sprintf("Quorum:  %v", s.quorum))
 	return nil
+}
+
+func CreateClient(address string) (client api.RaftClient, err error) {
+	log.Info().Msg("Creating Client")
+
+	opts := grpc.WithTransportCredentials(insecure.NewCredentials())
+
+	var conn *grpc.ClientConn
+	if conn, err = grpc.Dial(address, opts); err != nil {
+		return nil, err
+	}
+
+	client = api.NewRaftClient(conn)
+	return client, nil
 }

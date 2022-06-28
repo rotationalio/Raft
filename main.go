@@ -10,8 +10,6 @@ import (
 
 	"github.com/rs/zerolog/log"
 	cli "github.com/urfave/cli/v2"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
@@ -53,7 +51,6 @@ func main() {
 			Usage:    "",
 			Category: "Client",
 			Action:   appendValues,
-			Before:   createClient,
 			Flags: []cli.Flag{
 				&cli.Int64Flag{
 					Name:    "port",
@@ -92,12 +89,22 @@ func serve(c *cli.Context) (err error) {
 
 // Call AppendEntries and print the reply
 func appendValues(c *cli.Context) (err error) {
+	//
+	var client api.RaftClient
+	address := fmt.Sprintf("localhost:%d", c.Int("port"))
+	if client, err = raft.CreateClient(address); err != nil {
+		log.Error().Msg(fmt.Sprintf("error creating raft client: %v", err.Error()))
+		return cli.Exit(err, 1)
+	}
+
+	//
 	var stream api.Raft_AppendEntriesClient
 	if stream, err = client.AppendEntries(context.Background()); err != nil {
 		log.Error().Msg(fmt.Sprintf("error creating stream: %v", err.Error()))
 		return cli.Exit(err, 1)
 	}
 
+	//
 	vals := strings.Split(c.String("values"), ",")
 	for _, val := range vals {
 		log.Info().Msg(fmt.Sprintf("appending %v", val))
@@ -108,6 +115,7 @@ func appendValues(c *cli.Context) (err error) {
 		}
 	}
 
+	//
 	var reply *api.AppendEntriesReply
 	if reply, err = stream.CloseAndRecv(); err != nil {
 		log.Error().Msg(fmt.Sprintf("error finishing stream: %v", err.Error()))
@@ -127,15 +135,4 @@ func createAppendRequest(term int32, val string) *api.AppendEntriesRequest {
 			},
 		},
 	}
-}
-
-func createClient(c *cli.Context) (err error) {
-	log.Info().Msg("Creating Client")
-	var conn *grpc.ClientConn
-	opts := grpc.WithTransportCredentials(insecure.NewCredentials())
-	if conn, err = grpc.Dial(fmt.Sprintf("localhost:%d", c.Int("port")), opts); err != nil {
-		return err
-	}
-	client = api.NewRaftClient(conn)
-	return nil
 }
