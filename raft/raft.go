@@ -126,9 +126,9 @@ func (s *RaftServer) oneBigPipe() (err error) {
 					err = s.startElection()
 				}
 			}
-		}
-		if err != nil {
-			return
+			if err != nil {
+				return
+			}
 		}
 	}()
 	return err
@@ -150,10 +150,17 @@ func (s *RaftServer) sendHeartbeat() (err error) {
 	var out *api.AppendEntriesReply
 
 	for _, peer := range s.quorum {
-		stream, err = peer.Client.AppendEntries(context.TODO())
+		if stream, err = peer.Client.AppendEntries(context.TODO()); err != nil {
+			return err
+		}
+
 		stream.Send(in)
 		if out, err = stream.CloseAndRecv(); err != nil {
 			return err
+		}
+
+		if !out.Success {
+			log.Error().Msg("Heartbeat unsuccessful")
 		}
 	}
 	return nil
@@ -216,16 +223,21 @@ func (s *RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err err
 	var req *api.AppendEntriesRequest
 	for {
 		req, err = stream.Recv()
-		if err == io.EOF {
-			log.Info().Msg(fmt.Sprintf("current log: %v", s.log))
+		if req == nil {
+			if err == nil {
+				s.heartbeat.Reset()
+			}
+			if err == io.EOF {
+				log.Info().Msg(fmt.Sprintf("current log: %v", s.log))
+			}
+			if err != nil {
+				return err
+			}
 			return stream.SendAndClose(
 				&api.AppendEntriesReply{
 					Success: true,
 				},
 			)
-		}
-		if err != nil {
-			return err
 		}
 		s.log = append(s.log, req.Entries...)
 
