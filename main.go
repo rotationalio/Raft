@@ -72,6 +72,20 @@ func main() {
 				},
 			},
 		},
+		{
+			Name:     "reset",
+			Usage:    "",
+			Category: "Client",
+			Action:   resetServer,
+			Flags: []cli.Flag{
+				&cli.Int64Flag{
+					Name:    "port",
+					Aliases: []string{"p"},
+					Usage:   "port to dial",
+					Value:   9000,
+				},
+			},
+		},
 	}
 	app.Run(os.Args)
 }
@@ -135,4 +149,8 @@ func createAppendRequest(term int32, val string) *api.AppendEntriesRequest {
 			},
 		},
 	}
+}
+
+func resetServer(c *cli.Context) (err error) {
+	return nil
 }

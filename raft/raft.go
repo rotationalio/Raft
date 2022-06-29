@@ -17,14 +17,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-type State uint8
-
-const (
-	leader State = iota
-	follower
-	candidate
-)
-
 type Peer struct {
 	Id      string `json:"id"`
 	Port    int    `json:"port"`
@@ -54,8 +46,9 @@ type RaftServer struct {
 	api.UnimplementedRaftServer
 
 	// channels
-	shutdown  chan os.Signal
-	heartbeat *Ticker
+	shutdown        chan os.Signal
+	heartbeat       *Ticker
+	electionTimeout *Ticker
 
 	// Self identification
 	id      string // The uuid uniquely identifying the raft node.
@@ -103,15 +96,14 @@ func ServeRaft(port int, id string) (err error) {
 		return err
 	}
 
-	// serve in a go function with the created socket.
+	// Start the oneBigPipe event loop and serve in a go function with the created socket.
 	log.Info().Msg(fmt.Sprintf("serving %v on %v", id, raftNode.address))
 	go raftNode.oneBigPipe()
 	raftNode.srv.Serve(listener)
 	return nil
-
-	// TODO: Handle timeouts, votes, etc...
 }
 
+//
 func (s *RaftServer) oneBigPipe() (err error) {
 	err = nil
 	go func() {
@@ -134,10 +126,7 @@ func (s *RaftServer) oneBigPipe() (err error) {
 	return err
 }
 
-func (s *RaftServer) State() State {
-	return s.state
-}
-
+// Stope the server, log and exit.
 func (s *RaftServer) gracefulShutdown() {
 	fmt.Printf("\nStopping server on on %v\n", s.address)
 	s.srv.Stop()
@@ -167,18 +156,29 @@ func (s *RaftServer) sendHeartbeat() (err error) {
 }
 
 func (s *RaftServer) startElection() (err error) {
+	s.becomeCandidate()
 	s.currentTerm++
+	s.heartbeat.Reset()
+
+	votesReceived := 1
+	s.votedFor = s.id
+	votesNeeded := len(s.quorum)
+	log.Info().Msg(fmt.Sprintf("starting election, incremented term to %v", s.currentTerm))
+
+	var lastLogTerm int32
+	if s.log == nil {
+		lastLogTerm = 0
+	} else {
+		lastLogTerm = s.log[s.lastApplied].Term
+	}
 
 	var out *api.VoteReply
 	in := &api.VoteRequest{
 		Term:         s.currentTerm,
 		CandidateId:  s.id,
 		LastLogIndex: s.lastApplied,
-		LastLogTerm:  s.log[s.lastApplied].Term,
+		LastLogTerm:  lastLogTerm,
 	}
-
-	votesReceived := 0
-	votesNeeded := len(s.quorum) + 1
 
 	for _, peer := range s.quorum {
 
@@ -187,20 +187,32 @@ func (s *RaftServer) startElection() (err error) {
 		}
 
 		if out.VoteGranted {
-
+			log.Info().Msg(fmt.Sprintf("received successful vote from %v", peer.Id))
 			votesReceived++
+			log.Info().Msg(fmt.Sprintf("votes received: %v, votes needed: %v", votesReceived, votesNeeded))
 			if votesReceived >= votesNeeded {
+				log.Info().Msg(fmt.Sprintf("received %v successful votes, election successful", votesNeeded))
+				// TODO: is this the correct way to handle this?
+				if s.state == follower {
+					return nil
+				} else {
+					if err = s.becomeLeader(); err != nil {
+						return err
+					}
 
-				s.state = leader
+					if err = s.initialize(true); err != nil {
+						return err
+					}
 
-				if err = s.initialize(true); err != nil {
-					return err
-				}
-
-				if err = s.sendHeartbeat(); err != nil {
-					return err
+					log.Info().Msg("sending first heartbeat as leader")
+					if err = s.sendHeartbeat(); err != nil {
+						return err
+					}
+					return nil
 				}
 			}
+		} else {
+			log.Info().Msg(fmt.Sprintf("peer %v rejected vote", peer.Id))
 		}
 	}
 	return nil
@@ -225,7 +237,15 @@ func (s *RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err err
 		req, err = stream.Recv()
 		if req == nil {
 			if err == nil {
+				if s.state == candidate {
+					log.Info().Msg("heartbeat received from new leader, reverting to follower")
+					s.becomeFollower()
+					s.heartbeat.Reset()
+					return nil
+				}
+				log.Info().Msg("heartbeat received, resetting timeout")
 				s.heartbeat.Reset()
+				return nil
 			}
 			if err == io.EOF {
 				log.Info().Msg(fmt.Sprintf("current log: %v", s.log))
@@ -266,8 +286,19 @@ func (s *RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err err
 //    least as up-to-date as receiver’s log, grant vote (sections §5.2, §5.4 of the
 //    Raft whitepaper).
 // TODO: implement for multi-replica version with leader election
-func (s *RaftServer) RequestVote(ctx context.Context, req *api.VoteRequest) (rep *api.VoteReply, err error) {
-	return &api.VoteReply{}, nil
+func (s *RaftServer) RequestVote(ctx context.Context, in *api.VoteRequest) (out *api.VoteReply, err error) {
+	out = &api.VoteReply{Id: s.id, Term: s.currentTerm}
+	if in.Term < s.currentTerm {
+		out.VoteGranted = false
+	} else if s.votedFor != "" && s.votedFor != in.CandidateId {
+		out.VoteGranted = false
+	} else if in.LastLogIndex < s.lastApplied {
+		out.VoteGranted = false
+	} else {
+		out.VoteGranted = true
+		s.votedFor = in.CandidateId
+	}
+	return out, nil
 }
 
 func (s *RaftServer) initialize(electedLeader bool) error {
@@ -276,14 +307,13 @@ func (s *RaftServer) initialize(electedLeader bool) error {
 		s.votedFor = ""
 		s.commitIndex = 0
 		s.lastApplied = 0
-		s.state = follower
-		s.heartbeat = NewTicker(ElectionTimeoutTick)
+		s.becomeFollower()
+		s.electionTimeout = NewTicker(ElectionTimeoutTick)
 		err := s.findQuorum()
 		return err
 	} else {
 		s.nextIndex = int64(len(s.log) + 1)
 		s.matchIndex = 0
-		s.state = leader
 		s.heartbeat = NewTicker(HeartbeatTick)
 		return nil
 	}
