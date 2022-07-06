@@ -4,7 +4,7 @@ package api;
 option go_package = "github.com/rotationalio/api";
 
 service Raft {
-    rpc AppendEntries(stream AppendEntriesRequest) returns (stream AppendEntriesReply) {};
+    rpc AppendEntries(stream AppendEntriesRequest) returns (AppendEntriesReply) {};
     rpc RequestVote(VoteRequest) returns (VoteReply) {};
 }
 
@@ -49,9 +49,6 @@ message AppendEntriesReply {
 }
 
 message VoteRequest {
-    // The uuid of the Raft node sending the request.
-    string id = 1;
-    
     // The candidate's term.
     int32 term = 2;
 
@@ -59,7 +56,7 @@ message VoteRequest {
     string candidateId = 3;
 
     // The index of candidate’s last log entry (section 5.4 of the Raft whitepaper).
-    int32 lastLogIndex = 4;
+    int64 lastLogIndex = 4;
 
     // The term number of candidate’s last log entry (section 5.4 of the Raft whitepaper).
     int32 lastLogTerm = 5;

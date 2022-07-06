@@ -13,9 +13,8 @@ const (
 	candidate
 )
 
-func (s *RaftServer) becomeFollower() error {
+func (s *RaftServer) becomeFollower() {
 	s.state = follower
-	return nil
 }
 
 func (s *RaftServer) becomeCandidate() error {

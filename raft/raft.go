@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"os"
 	"os/signal"
@@ -25,30 +26,28 @@ type Peer struct {
 }
 
 const (
-	ElectionTimeoutTick time.Duration = time.Second * 5
-	HeartbeatTick       time.Duration = time.Second * 2
+	ElectionTimeoutTick time.Duration = time.Second * 8
+	HeartbeatTick       time.Duration = time.Second * 5
 )
 
 type Ticker struct {
 	period  time.Duration
-	timeout time.Ticker
+	timeout *time.Ticker
+	ch      <-chan time.Time
 }
 
 func NewTicker(period time.Duration) *Ticker {
-	return &Ticker{period, *time.NewTicker(period)}
-}
-
-func (t *Ticker) Reset() {
-	t.timeout = *time.NewTicker(t.period)
+	timeout := *time.NewTicker(period)
+	return &Ticker{period: period, timeout: &timeout, ch: timeout.C}
 }
 
 type RaftServer struct {
 	api.UnimplementedRaftServer
 
 	// channels
-	shutdown        chan os.Signal
-	heartbeat       *Ticker
-	electionTimeout *Ticker
+	timeout  *Ticker
+	shutdown chan os.Signal
+	errC     chan error
 
 	// Self identification
 	id      string // The uuid uniquely identifying the raft node.
@@ -99,31 +98,39 @@ func ServeRaft(port int, id string) (err error) {
 	// Start the oneBigPipe event loop and serve in a go function with the created socket.
 	log.Info().Msg(fmt.Sprintf("serving %v on %v", id, raftNode.address))
 	go raftNode.oneBigPipe()
-	raftNode.srv.Serve(listener)
-	return nil
+	err = raftNode.Serve(listener)
+	return err
+}
+
+func (s *RaftServer) Serve(listener net.Listener) error {
+	go func() {
+		err := <-s.errC
+		log.Error().Msg(fmt.Sprintf("encountered error: %v", err))
+		s.gracefulShutdown()
+	}()
+	err := s.srv.Serve(listener)
+	return err
 }
 
 //
-func (s *RaftServer) oneBigPipe() (err error) {
-	err = nil
+func (s *RaftServer) oneBigPipe() {
 	go func() {
 		for {
 			select {
 			case <-s.shutdown:
 				s.gracefulShutdown()
-			case <-s.heartbeat.timeout.C:
-				if s.state == leader {
-					err = s.sendHeartbeat()
-				} else {
-					err = s.startElection()
-				}
-			}
-			if err != nil {
 				return
+			case <-s.timeout.ch:
+				if s.state == leader {
+					log.Info().Msg("HEARTBEAT")
+					go s.sendHeartbeat()
+				} else {
+					log.Info().Msg("ELECTION")
+					go s.startElection()
+				}
 			}
 		}
 	}()
-	return err
 }
 
 // Stope the server, log and exit.
@@ -133,35 +140,41 @@ func (s *RaftServer) gracefulShutdown() {
 	os.Exit(1)
 }
 
-func (s *RaftServer) sendHeartbeat() (err error) {
+func (s *RaftServer) sendHeartbeat() {
 	var stream api.Raft_AppendEntriesClient
-	in := &api.AppendEntriesRequest{}
+	in := &api.AppendEntriesRequest{Id: s.id, Term: s.currentTerm}
 	var out *api.AppendEntriesReply
 
+	var err error
 	for _, peer := range s.quorum {
 		if stream, err = peer.Client.AppendEntries(context.TODO()); err != nil {
-			return err
+			s.errC <- err
+			return
 		}
 
 		stream.Send(in)
 		if out, err = stream.CloseAndRecv(); err != nil {
-			return err
+			if err != io.EOF {
+				s.errC <- err
+			} else {
+				continue
+			}
 		}
 
 		if !out.Success {
 			log.Error().Msg("Heartbeat unsuccessful")
 		}
 	}
-	return nil
 }
 
-func (s *RaftServer) startElection() (err error) {
+func (s *RaftServer) startElection() {
 	s.becomeCandidate()
 	s.currentTerm++
-	s.heartbeat.Reset()
 
+	// vote for self
 	votesReceived := 1
 	s.votedFor = s.id
+	defer s.resetVotedFor()
 	votesNeeded := len(s.quorum)
 	log.Info().Msg(fmt.Sprintf("starting election, incremented term to %v", s.currentTerm))
 
@@ -180,42 +193,50 @@ func (s *RaftServer) startElection() (err error) {
 		LastLogTerm:  lastLogTerm,
 	}
 
+	var err error
 	for _, peer := range s.quorum {
-
+		if s.state == follower {
+			log.Info().Msg("reverted to follower, abandoning election")
+			return
+		}
 		if out, err = peer.Client.RequestVote(context.TODO(), in); err != nil {
-			return err
+			s.errC <- err
+			return
 		}
 
 		if out.VoteGranted {
-			log.Info().Msg(fmt.Sprintf("received successful vote from %v", peer.Id))
 			votesReceived++
-			log.Info().Msg(fmt.Sprintf("votes received: %v, votes needed: %v", votesReceived, votesNeeded))
+			log.Info().Msg(fmt.Sprintf("received successful vote from %v, %v/%v", peer.Id, votesReceived, votesNeeded))
 			if votesReceived >= votesNeeded {
 				log.Info().Msg(fmt.Sprintf("received %v successful votes, election successful", votesNeeded))
 				// TODO: is this the correct way to handle this?
 				if s.state == follower {
-					return nil
+					log.Info().Msg("reverted to follower, abandoning election")
+					return
 				} else {
 					if err = s.becomeLeader(); err != nil {
-						return err
-					}
-
-					if err = s.initialize(true); err != nil {
-						return err
+						s.errC <- err
+						return
 					}
 
 					log.Info().Msg("sending first heartbeat as leader")
-					if err = s.sendHeartbeat(); err != nil {
-						return err
+					s.sendHeartbeat()
+
+					if err = s.initialize(true); err != nil {
+						s.errC <- err
+						return
 					}
-					return nil
+					return
 				}
 			}
 		} else {
-			log.Info().Msg(fmt.Sprintf("peer %v rejected vote", peer.Id))
+			log.Info().Msg(fmt.Sprintf("peer %v rejected vote, current votes: %v", peer.Id, votesReceived))
 		}
 	}
-	return nil
+}
+
+func (s *RaftServer) resetVotedFor() {
+	s.votedFor = ""
 }
 
 // Invoked by leader to replicate log entries (section 5.3 of the Raft whitepaper);
@@ -235,48 +256,59 @@ func (s *RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err err
 	var req *api.AppendEntriesRequest
 	for {
 		req, err = stream.Recv()
-		if req == nil {
+		if req.Entries == nil {
 			if err == nil {
-				if s.state == candidate {
-					log.Info().Msg("heartbeat received from new leader, reverting to follower")
-					s.becomeFollower()
-					s.heartbeat.Reset()
-					return nil
+				// While waiting for votes a candidate may receive an AppendEntries RPC
+				// from another server claiming to be leader.
+				log.Info().Msg("heartbeat received")
+				if s.state != follower {
+					// If the leader's term (included in it's RPC) is at least as large
+					// as the candidate's current term, then the candidate recognizes the
+					// leader as legitimate and returns to follower state.
+					if req.Term >= s.currentTerm {
+						log.Info().Msg("heartbeat received from new leader, reverting to follower")
+						s.becomeFollower()
+						s.timeout = NewTicker(s.electionTick())
+						return stream.SendAndClose(&api.AppendEntriesReply{Success: true})
+					} else {
+						// If the term in the RPC is smaller than the candidate's term than the
+						// candidate rejects the RPC and continues in candidate state
+						log.Info().Msg(fmt.Sprintf("request term %v smaller than current term %v", req.Term, s.currentTerm))
+						return stream.SendAndClose(&api.AppendEntriesReply{Success: false})
+					}
 				}
+				// If current state is follower, log that you have received a heartbeat from the leader,
+				// reset the election timeout and return success.
 				log.Info().Msg("heartbeat received, resetting timeout")
-				s.heartbeat.Reset()
-				return nil
+				s.timeout = NewTicker(s.electionTick())
+				return stream.SendAndClose(&api.AppendEntriesReply{Success: true})
 			}
-			if err == io.EOF {
-				log.Info().Msg(fmt.Sprintf("current log: %v", s.log))
-			}
-			if err != nil {
-				return err
-			}
-			return stream.SendAndClose(
-				&api.AppendEntriesReply{
-					Success: true,
-				},
-			)
+		}
+		if err == io.EOF {
+			log.Info().Msg(fmt.Sprintf("current log: %v", s.log))
+			return stream.SendAndClose(&api.AppendEntriesReply{Success: true})
+		}
+		if err != nil {
+			s.errC <- err
 		}
 		s.log = append(s.log, req.Entries...)
-
-		// TODO: use the following to handle multi-replica case (tentative)
-		//for _, entry := range req.Entries {
-		// if i >= len(s.Log) {
-		//	s.Log = append(s.Log, entry)
-		// } else if entry.Term < s.CurrentTerm {
-		// 	return stream.SendAndClose(
-		// 		&api.AppendEntriesReply{
-		// 			Success: false,
-		// 		})
-		//} else if entry.Term != s.Log[i].Term {
-		// if entry.Term != s.Log[i].Term {
-		// 	s.Log = s.Log[:i]
-		// }
-		//}
 	}
 }
+
+// TODO: use the following to handle multi-replica case (tentative)
+//for _, entry := range req.Entries {
+// if i >= len(s.Log) {
+//	s.Log = append(s.Log, entry)
+// } else if entry.Term < s.CurrentTerm {
+// 	return stream.SendAndClose(
+// 		&api.AppendEntriesReply{
+// 			Success: false,
+// 		})
+//} else if entry.Term != s.Log[i].Term {
+// if entry.Term != s.Log[i].Term {
+// 	s.Log = s.Log[:i]
+// }
+//}
 
 // Invoked by candidates to gather votes (§5.2).
 //
@@ -288,35 +320,45 @@ func (s *RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err err
 // TODO: implement for multi-replica version with leader election
 func (s *RaftServer) RequestVote(ctx context.Context, in *api.VoteRequest) (out *api.VoteReply, err error) {
 	out = &api.VoteReply{Id: s.id, Term: s.currentTerm}
-	if in.Term < s.currentTerm {
-		out.VoteGranted = false
-	} else if s.votedFor != "" && s.votedFor != in.CandidateId {
-		out.VoteGranted = false
-	} else if in.LastLogIndex < s.lastApplied {
-		out.VoteGranted = false
-	} else {
-		out.VoteGranted = true
-		s.votedFor = in.CandidateId
+	if in.Term >= s.currentTerm {
+		if s.votedFor == "" || s.votedFor == in.CandidateId {
+			if in.LastLogIndex >= s.lastApplied {
+				out.VoteGranted = true
+				return out, nil
+			}
+
+		}
 	}
+	out.VoteGranted = false
 	return out, nil
 }
 
-func (s *RaftServer) initialize(electedLeader bool) error {
+func (s *RaftServer) initialize(electedLeader bool) (err error) {
 	if !electedLeader {
 		s.currentTerm = 0
 		s.votedFor = ""
 		s.commitIndex = 0
 		s.lastApplied = 0
+		s.errC = make(chan error)
 		s.becomeFollower()
-		s.electionTimeout = NewTicker(ElectionTimeoutTick)
-		err := s.findQuorum()
-		return err
+		s.timeout = NewTicker(s.electionTick())
+
+		if err = s.findQuorum(); err != nil {
+			return err
+		}
 	} else {
 		s.nextIndex = int64(len(s.log) + 1)
 		s.matchIndex = 0
-		s.heartbeat = NewTicker(HeartbeatTick)
-		return nil
+		s.timeout = NewTicker(HeartbeatTick)
 	}
+	return nil
+}
+
+func (s *RaftServer) electionTick() time.Duration {
+	rand.Seed(int64(s.port))
+	electionTimeoutEpsilon := time.Millisecond * time.Duration(rand.Intn(150))
+	timeoutDuration := ElectionTimeoutTick + electionTimeoutEpsilon
+	return timeoutDuration
 }
 
 func (s *RaftServer) findQuorum() (err error) {
