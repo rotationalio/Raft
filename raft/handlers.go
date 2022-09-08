@@ -47,7 +47,7 @@ func (s *RaftServer) startElection() {
 	fmt.Printf("starting election, incremented term to %v\n", s.currentTerm)
 }
 
-func (s *RaftServer) conductElection() {
+func (s *RaftServer) conductElection() (success bool) {
 	votesReceived := 1
 	votesNeeded := len(s.quorum) // A majority
 
@@ -70,11 +70,11 @@ func (s *RaftServer) conductElection() {
 	for _, peer := range s.quorum {
 		if s.state == follower {
 			log.Debug().Msg("reverted to follower, abandoning election")
-			return
+			return false
 		}
 		if out, err = peer.Client.RequestVote(context.TODO(), in); err != nil {
 			s.errC <- err
-			return
+			return false
 		}
 
 		if out.VoteGranted {
@@ -84,19 +84,17 @@ func (s *RaftServer) conductElection() {
 				// TODO: is this the correct way to handle this?
 				if s.state == follower {
 					fmt.Printf("reverted to follower, abandoning election\n")
-					s.heartbeat <- true
-					return
+					return false
 				} else {
 					fmt.Printf("received %v successful votes, election successful\n", votesNeeded)
-					s.heartbeat <- false
-					return
+					return true
 				}
 			}
 		} else {
 			fmt.Printf("peer %v rejected vote, current votes: %v\n", peer.Id, votesReceived)
 		}
 	}
-	s.heartbeat <- false
+	return false
 }
 
 func (s *RaftServer) resetVotedFor() {
@@ -131,7 +129,7 @@ func (s *RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err err
 					// leader as legitimate and returns to follower state.
 					if req.Term >= s.currentTerm {
 						fmt.Printf("received successful heartbeat from %s\n", req.Id)
-						s.heartbeat <- true
+						s.becomeFollower()
 						s.timeout.Reset(s.electionTick())
 						return stream.SendAndClose(&api.AppendEntriesReply{Success: true})
 					} else {

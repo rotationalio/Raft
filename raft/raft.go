@@ -121,7 +121,6 @@ func (s *RaftServer) Serve(listener net.Listener) error {
 	return err
 }
 
-//
 func (s *RaftServer) oneBigPipe() {
 	prevState := s.state
 	go func() {
@@ -136,12 +135,10 @@ func (s *RaftServer) oneBigPipe() {
 					s.timeout.Reset(HeartbeatTick)
 				} else {
 					s.startElection()
-					go s.conductElection()
-					heartbeatReceived := <-s.heartbeat
-					if heartbeatReceived {
+					success := s.conductElection()
+					if !success {
 						fmt.Println("heartbeat received from new leader, reverting to follower")
-						s.becomeFollower()
-						s.timeout.Reset(HeartbeatTick)
+						s.timeout.Reset(s.electionTick())
 					} else {
 						var err error
 						if err = s.becomeLeader(); err != nil {
