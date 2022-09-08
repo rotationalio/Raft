@@ -13,6 +13,10 @@ const (
 	candidate
 )
 
+var States = [...]string{
+	"leader", "follower", "candidate",
+}
+
 func (s *RaftServer) becomeFollower() {
 	s.state = follower
 }
