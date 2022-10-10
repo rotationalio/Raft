@@ -30,8 +30,10 @@ type RaftServer struct {
 	api.UnimplementedRaftServer
 
 	// channels
-	shutdown chan os.Signal
-	errC     chan error
+	shutdown       chan os.Signal
+	newCommitReady chan struct{}
+	commitChan     chan<- api.Entry
+	errC           chan error
 
 	// Self identification
 	id            string // The uuid uniquely identifying the raft node.
@@ -47,14 +49,14 @@ type RaftServer struct {
 	log         []*api.Entry // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1).
 
 	// Volatile state on all servers
-	//commitIndex int64 // index of the highest log entry known to be committed (initialized to 0, increases monotonically).
+	commitIndex int32 // index of the highest log entry known to be committed (initialized to 0, increases monotonically).
 	lastApplied int64 // index of highest log entry applied to state machine (initialized to 0, increases monotonically).
 	state       State // The current state of the node, either leader, candidate or follower.
 
 	// Volatile state on leaders (Reinitialized after election).
 	// TODO: change these to slices when dealing with multiple replica state
-	//nextIndex  int64 // for each server, index of the next log entry to send to that server (initialized to leader's last log index + 1).
-	//matchIndex int64 // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically).
+	nextIndex  map[string]int // for each server, index of the next log entry to send to that server (initialized to leader's last log index + 1).
+	matchIndex map[string]int // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically).
 }
 
 func ServeRaft(port int, id string) (err error) {
@@ -64,7 +66,9 @@ func ServeRaft(port int, id string) (err error) {
 	raftNode := RaftServer{srv: grpc.NewServer()}
 	raftNode.id = id
 	raftNode.port = port
-	raftNode.becomeFollower(0)
+	raftNode.state = follower
+	raftNode.currentTerm = 0
+	raftNode.votedFor = ""
 	api.RegisterRaftServer(raftNode.srv, &raftNode)
 
 	// Create a channel to receive interrupt signals and shutdown the server.
@@ -88,7 +92,11 @@ func ServeRaft(port int, id string) (err error) {
 	fmt.Printf("node's quorum: %v\n", raftNode.quorum)
 
 	raftNode.lastHeartbeat = time.Now()
+	fmt.Println("ServeRaft: running election timer")
 	raftNode.runElectionTimer()
+
+	raftNode.nextIndex = make(map[string]int)
+	raftNode.matchIndex = make(map[string]int)
 
 	fmt.Printf("serving %v on %v\n", id, raftNode.address)
 	err = raftNode.Serve(listener)
@@ -110,6 +118,30 @@ func (s *RaftServer) gracefulShutdown() {
 	fmt.Printf("Stopping server on %v\n", s.address)
 	s.srv.Stop()
 	os.Exit(1)
+}
+
+func (s *RaftServer) commitChannelSender() {
+	for range s.newCommitReady {
+		s.Lock()
+
+		var entries []*api.Entry
+		startingTerm := s.currentTerm
+		startingLastApplied := s.lastApplied
+		if s.commitIndex > int32(s.lastApplied) {
+			entries = s.log[s.lastApplied+1 : s.commitIndex+1]
+			s.lastApplied = int64(s.commitIndex)
+		}
+
+		s.Unlock()
+
+		for i, entry := range entries {
+			s.commitChan <- api.Entry{
+				Value: entry.Value,
+				Index: int32(startingLastApplied) + int32(i+1),
+				Term:  startingTerm,
+			}
+		}
+	}
 }
 
 func (s *RaftServer) findQuorum() (err error) {
@@ -136,7 +168,7 @@ func (s *RaftServer) findQuorum() (err error) {
 }
 
 func CreateClient(address string) (client api.RaftClient, err error) {
-	fmt.Println("Creating Client")
+	fmt.Println("Creating Raft Peer Client")
 
 	opts := grpc.WithTransportCredentials(insecure.NewCredentials())
 

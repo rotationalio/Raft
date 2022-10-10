@@ -35,14 +35,14 @@ func (s *RaftServer) runElectionTimer() {
 
 		s.Lock()
 		if s.state == leader {
-			s.Unlock()
 			fmt.Println("election timer running while in leader state")
+			s.Unlock()
 			return
 		}
 
 		if startingTerm != s.currentTerm {
+			fmt.Printf("term incremented to %v while election timer running, expecting %v\n", s.currentTerm, startingTerm)
 			s.Unlock()
-			fmt.Println("term incremented while election timer running")
 			return
 		}
 

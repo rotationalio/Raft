@@ -20,11 +20,11 @@ var States = [...]string{
 }
 
 func (s *RaftServer) becomeFollower(term int32) {
-	fmt.Println("Reverting to follower")
 	s.state = follower
 	s.currentTerm = term
 	s.votedFor = ""
 	s.lastHeartbeat = time.Now()
+	fmt.Println("becomeFollower: running election timer")
 	go s.runElectionTimer()
 }
 
@@ -43,12 +43,18 @@ func (s *RaftServer) becomeLeader() {
 	} else {
 		s.state = leader
 	}
-	fmt.Println("Becoming leader")
+
+	for _, peer := range s.quorum {
+		s.nextIndex[peer.Id] = len(s.log)
+		s.matchIndex[peer.Id] = -1
+	}
+
 	// TODO: separate go routine into it's own function
 	go func() {
 		ticker := NewTicker(50 * time.Millisecond)
 		defer ticker.timeout.Stop()
 
+		println("Sending heartbeats as leader")
 		for {
 			s.sendHeartbeat()
 			<-ticker.ch
@@ -56,6 +62,7 @@ func (s *RaftServer) becomeLeader() {
 			s.Lock()
 			if s.state != leader {
 				s.Unlock()
+				println("State no longer leader")
 				return
 			}
 			s.Unlock()

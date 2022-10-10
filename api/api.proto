@@ -84,5 +84,8 @@ message Entry {
     int32 Term = 1;
     
     //
-    string Value = 2;
+    int32 Index = 3;
+
+    //
+    bytes Value = 2;
 }

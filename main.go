@@ -122,7 +122,7 @@ func appendValues(c *cli.Context) (err error) {
 	vals := strings.Split(c.String("values"), ",")
 	for _, val := range vals {
 		log.Info().Msg(fmt.Sprintf("appending %v", val))
-		req := createAppendRequest(int32(c.Int("term")), val)
+		req := createAppendRequest(int32(c.Int("term")), []byte(val))
 		if err = stream.Send(req); err != nil {
 			log.Error().Msg(fmt.Sprintf("error sending on stream: %v", err.Error()))
 			return cli.Exit(err, 1)
@@ -139,7 +139,7 @@ func appendValues(c *cli.Context) (err error) {
 	return nil
 }
 
-func createAppendRequest(term int32, val string) *api.AppendEntriesRequest {
+func createAppendRequest(term int32, val []byte) *api.AppendEntriesRequest {
 	return &api.AppendEntriesRequest{
 		Term: term,
 		Entries: []*api.Entry{
