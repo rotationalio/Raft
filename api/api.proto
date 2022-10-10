@@ -6,6 +6,7 @@ option go_package = "github.com/rotationalio/api";
 service Raft {
     rpc AppendEntries(stream AppendEntriesRequest) returns (AppendEntriesReply) {};
     rpc RequestVote(VoteRequest) returns (VoteReply) {};
+    rpc Submit(SubmitRequest) returns (SubmitReply) {};
 }
 
 message AppendEntriesRequest {
@@ -88,4 +89,12 @@ message Entry {
 
     //
     bytes Value = 2;
+}
+
+message SubmitRequest {
+    bytes Value = 1;
+}
+
+message SubmitReply {
+    bool Success = 1;
 }

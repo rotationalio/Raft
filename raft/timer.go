@@ -27,7 +27,7 @@ func (s *RaftServer) runElectionTimer() {
 	s.Unlock()
 
 	timeout := getElectionTick()
-	ticker := NewTicker(10 * time.Millisecond)
+	ticker := NewTicker(500 * time.Millisecond)
 	defer ticker.timeout.Stop()
 
 	for {

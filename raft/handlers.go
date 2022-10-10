@@ -96,7 +96,6 @@ func (s *RaftServer) sendHeartbeat() {
 	var out *api.AppendEntriesReply
 	for _, peer := range s.quorum {
 		var stream api.Raft_AppendEntriesClient
-		fmt.Printf("sending heartbeat to %v\n", peer.Id)
 		if stream, err = peer.Client.AppendEntries(context.TODO()); err != nil {
 			s.errC <- err
 			return
@@ -211,7 +210,7 @@ func (s *RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err err
 			fmt.Printf("AppendEntries: s.state != follower, reverting to follower")
 			s.becomeFollower(req.Term)
 		}
-		fmt.Println("received heartbeat from leader")
+		fmt.Printf("received heartbeat from leader at %v\n", time.Now())
 		s.lastHeartbeat = time.Now()
 
 		if req.PrevLogIndex == -1 || (req.PrevLogIndex < int32(len(s.log)) && req.PrevLogTerm == s.log[req.PrevLogIndex].Term) {
@@ -228,6 +227,11 @@ func (s *RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err err
 				newEntryIndex++
 			}
 
+			if newEntryIndex < len(req.Entries) {
+				s.log = append(s.log[:insertIndex], req.Entries[newEntryIndex:]...)
+				fmt.Printf("\n\n\n%v\n\n\n", s.log)
+			}
+
 			if req.LeaderCommit > s.commitIndex {
 				s.commitIndex = int32(len(s.log) - 1)
 				if req.LeaderCommit < int32(len(s.log)-1) {
@@ -240,6 +244,7 @@ func (s *RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err err
 
 	rep.Term = s.currentTerm
 	stream.SendAndClose(rep)
+	fmt.Printf("current log: %v\n", s.log)
 	return nil
 }
 

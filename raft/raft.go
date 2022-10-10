@@ -2,6 +2,7 @@ package raft
 
 import (
 	"Raft/api"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -99,6 +100,7 @@ func ServeRaft(port int, id string) (err error) {
 	raftNode.matchIndex = make(map[string]int)
 
 	fmt.Printf("serving %v on %v\n", id, raftNode.address)
+	go raftNode.commitChannelSender()
 	err = raftNode.Serve(listener)
 	return err
 }
@@ -142,6 +144,18 @@ func (s *RaftServer) commitChannelSender() {
 			}
 		}
 	}
+}
+
+func (s *RaftServer) Submit(ctx context.Context, req *api.SubmitRequest) (*api.SubmitReply, error) {
+	s.Lock()
+	defer s.Unlock()
+
+	if s.state == leader {
+		entry := &api.Entry{Term: s.currentTerm, Index: int32(len(s.log)), Value: req.Value}
+		s.log = append(s.log, entry)
+		return &api.SubmitReply{Success: true}, nil
+	}
+	return &api.SubmitReply{Success: false}, nil
 }
 
 func (s *RaftServer) findQuorum() (err error) {

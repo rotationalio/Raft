@@ -47,10 +47,10 @@ func main() {
 			},
 		},
 		{
-			Name:     "append",
+			Name:     "submit",
 			Usage:    "",
 			Category: "Client",
-			Action:   appendValues,
+			Action:   SubmitValues,
 			Flags: []cli.Flag{
 				&cli.Int64Flag{
 					Name:    "port",
@@ -90,10 +90,6 @@ func main() {
 	app.Run(os.Args)
 }
 
-var (
-	client api.RaftClient
-)
-
 func serve(c *cli.Context) (err error) {
 	if err = raft.ServeRaft(c.Int("port"), c.String("id")); err != nil {
 		return cli.Exit(err, 1)
@@ -102,7 +98,7 @@ func serve(c *cli.Context) (err error) {
 }
 
 // Call AppendEntries and print the reply
-func appendValues(c *cli.Context) (err error) {
+func SubmitValues(c *cli.Context) (err error) {
 	//
 	var client api.RaftClient
 	address := fmt.Sprintf("localhost:%d", c.Int("port"))
@@ -112,43 +108,18 @@ func appendValues(c *cli.Context) (err error) {
 	}
 
 	//
-	var stream api.Raft_AppendEntriesClient
-	if stream, err = client.AppendEntries(context.Background()); err != nil {
-		log.Error().Msg(fmt.Sprintf("error creating stream: %v", err.Error()))
-		return cli.Exit(err, 1)
-	}
-
-	//
 	vals := strings.Split(c.String("values"), ",")
 	for _, val := range vals {
 		log.Info().Msg(fmt.Sprintf("appending %v", val))
-		req := createAppendRequest(int32(c.Int("term")), []byte(val))
-		if err = stream.Send(req); err != nil {
+		req := &api.SubmitRequest{Value: []byte(val)}
+		var rep *api.SubmitReply
+		if rep, err = client.Submit(context.Background(), req); err != nil {
 			log.Error().Msg(fmt.Sprintf("error sending on stream: %v", err.Error()))
 			return cli.Exit(err, 1)
 		}
+		log.Info().Msg(fmt.Sprintf("success: %t", rep.Success))
 	}
-
-	//
-	var reply *api.AppendEntriesReply
-	if reply, err = stream.CloseAndRecv(); err != nil {
-		log.Error().Msg(fmt.Sprintf("error finishing stream: %v", err.Error()))
-		return cli.Exit(err, 1)
-	}
-	log.Info().Msg(fmt.Sprintf("success: %t", reply.Success))
 	return nil
-}
-
-func createAppendRequest(term int32, val []byte) *api.AppendEntriesRequest {
-	return &api.AppendEntriesRequest{
-		Term: term,
-		Entries: []*api.Entry{
-			{
-				Term:  term,
-				Value: val,
-			},
-		},
-	}
 }
 
 func resetServer(c *cli.Context) (err error) {
