@@ -72,20 +72,6 @@ func main() {
 				},
 			},
 		},
-		{
-			Name:     "reset",
-			Usage:    "",
-			Category: "Client",
-			Action:   resetServer,
-			Flags: []cli.Flag{
-				&cli.Int64Flag{
-					Name:    "port",
-					Aliases: []string{"p"},
-					Usage:   "port to dial",
-					Value:   9000,
-				},
-			},
-		},
 	}
 	app.Run(os.Args)
 }
@@ -119,9 +105,5 @@ func SubmitValues(c *cli.Context) (err error) {
 		}
 		log.Info().Msg(fmt.Sprintf("success: %t", rep.Success))
 	}
-	return nil
-}
-
-func resetServer(c *cli.Context) (err error) {
 	return nil
 }

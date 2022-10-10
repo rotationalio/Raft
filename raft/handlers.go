@@ -90,6 +90,7 @@ func (s *RaftServer) lastLogIndexAndTerm() (int, int) {
 func (s *RaftServer) sendHeartbeat() {
 	s.Lock()
 	startingTerm := s.currentTerm
+	fmt.Printf("current log: %v\n", s.log)
 	s.Unlock()
 
 	var err error
@@ -247,21 +248,6 @@ func (s *RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err err
 	fmt.Printf("current log: %v\n", s.log)
 	return nil
 }
-
-// TODO: use the following to handle multi-replica case (tentative)
-//for _, entry := range req.Entries {
-// if i >= len(s.Log) {
-//	s.Log = append(s.Log, entry)
-// } else if entry.Term < s.CurrentTerm {
-// 	return stream.SendAndClose(
-// 		&api.AppendEntriesReply{
-// 			Success: false,
-// 		})
-//} else if entry.Term != s.Log[i].Term {
-// if entry.Term != s.Log[i].Term {
-// 	s.Log = s.Log[:i]
-// }
-//}
 
 // Invoked by candidates to gather votes (§5.2).
 //
