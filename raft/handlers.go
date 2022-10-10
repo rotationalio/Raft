@@ -87,6 +87,26 @@ func (s *RaftServer) lastLogIndexAndTerm() (int, int) {
 	}
 }
 
+func (s *RaftServer) sendHeartbeatsAsLeader() {
+	ticker := NewTicker(1000 * time.Millisecond)
+	defer ticker.timeout.Stop()
+
+	println("Sending heartbeats as leader")
+	for {
+		fmt.Printf("sending heartbeats at %v\n", time.Now())
+		s.sendHeartbeat()
+		<-ticker.ch
+
+		s.Lock()
+		if s.state != leader {
+			s.Unlock()
+			println("State no longer leader")
+			return
+		}
+		s.Unlock()
+	}
+}
+
 func (s *RaftServer) sendHeartbeat() {
 	s.Lock()
 	startingTerm := s.currentTerm
@@ -230,7 +250,6 @@ func (s *RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err err
 
 			if newEntryIndex < len(req.Entries) {
 				s.log = append(s.log[:insertIndex], req.Entries[newEntryIndex:]...)
-				fmt.Printf("\n\n\n%v\n\n\n", s.log)
 			}
 
 			if req.LeaderCommit > s.commitIndex {
@@ -256,15 +275,10 @@ func (s *RaftServer) AppendEntries(stream api.Raft_AppendEntriesServer) (err err
 // 2. If votedFor is null or candidateId, and candidate’s log is at
 //    least as up-to-date as receiver’s log, grant vote (sections §5.2, §5.4 of the
 //    Raft whitepaper).
-// TODO: implement for multi-replica version with leader election
 func (s *RaftServer) RequestVote(ctx context.Context, in *api.VoteRequest) (out *api.VoteReply, err error) {
 	s.Lock()
 	defer s.Unlock()
 	out = &api.VoteReply{Id: s.id, Term: s.currentTerm}
-
-	if s.state == dead {
-		return nil, fmt.Errorf("node is dead")
-	}
 	lastLogIndex, lastLogTerm := s.lastLogIndexAndTerm()
 
 	if in.Term > s.currentTerm {

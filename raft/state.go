@@ -49,24 +49,5 @@ func (s *RaftServer) becomeLeader() {
 		s.matchIndex[peer.Id] = -1
 	}
 
-	// TODO: separate go routine into it's own function
-	go func() {
-		ticker := NewTicker(1000 * time.Millisecond)
-		defer ticker.timeout.Stop()
-
-		println("Sending heartbeats as leader")
-		for {
-			fmt.Printf("sending heartbeats at %v\n", time.Now())
-			s.sendHeartbeat()
-			<-ticker.ch
-
-			s.Lock()
-			if s.state != leader {
-				s.Unlock()
-				println("State no longer leader")
-				return
-			}
-			s.Unlock()
-		}
-	}()
+	go s.sendHeartbeatsAsLeader()
 }
